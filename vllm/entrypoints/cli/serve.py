@@ -138,17 +138,29 @@ class ServeSubcommand(CLISubcommand):
 
         # The diffusion canvas side channel uses a per-process broadcaster:
         # a /v1/diffusion/events subscriber only sees requests handled by the
-        # same API server process, so it requires a single API server.
-        if (
-            getattr(args, "diffusion_stream_canvas", False)
-            and args.api_server_count > 1
-        ):
-            logger.warning(
-                "--diffusion-stream-canvas requires a single API server. "
-                "Capping api_server_count from %d to 1.",
-                args.api_server_count,
-            )
-            args.api_server_count = 1
+        # same FastAPI process, so it requires the single-process frontend.
+        if getattr(args, "diffusion_stream_canvas", False):
+            if is_multi_port:
+                raise ValueError(
+                    "--diffusion-stream-canvas is not supported with "
+                    "multi-port external load balancing: the supervisor "
+                    "starts one API server per DP rank, and a "
+                    "/v1/diffusion/events subscriber would only see the "
+                    "requests handled by its own server."
+                )
+            if envs.VLLM_RUST_FRONTEND_PATH:
+                raise ValueError(
+                    "--diffusion-stream-canvas is not supported with the "
+                    "Rust frontend: the /v1/diffusion/events endpoint is "
+                    "only served by the FastAPI frontend."
+                )
+            if args.api_server_count > 1:
+                logger.warning(
+                    "--diffusion-stream-canvas requires a single API server. "
+                    "Capping api_server_count from %d to 1.",
+                    args.api_server_count,
+                )
+                args.api_server_count = 1
 
         if is_multi_port:
             run_dp_supervisor(args)
