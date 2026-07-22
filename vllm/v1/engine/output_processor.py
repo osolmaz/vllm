@@ -29,6 +29,10 @@ from vllm.tracing import (
 from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
 from vllm.v1.engine.detokenizer import IncrementalDetokenizer
+from vllm.v1.engine.diffusion_events import (
+    DiffusionCanvasEvent,
+    DiffusionEventBroadcaster,
+)
 from vllm.v1.engine.logprobs import LogprobsProcessor
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.metrics.stats import (
@@ -172,6 +176,8 @@ class RequestState:
         self.is_prefilling = True
         self.queue = queue
         self.num_cached_tokens = 0
+        # Diffusion LLMs: denoising steps observed for this request.
+        self.diffusion_step = 0
 
         self.stats = RequestStateStats(arrival_time=arrival_time) if log_stats else None
 
@@ -424,6 +430,7 @@ class OutputProcessor:
         log_stats: bool,
         stream_interval: int = 1,
         tracing_enabled: bool = False,
+        diffusion_event_broadcaster: DiffusionEventBroadcaster | None = None,
     ):
         self.log_stats = log_stats
         self.tokenizer = tokenizer
@@ -433,6 +440,7 @@ class OutputProcessor:
         self.external_req_ids: defaultdict[str, list[str]] = defaultdict(list)
         self.lora_states = LoRARequestStates(log_stats)
         self.tracing_enabled = tracing_enabled
+        self.diffusion_event_broadcaster = diffusion_event_broadcaster
 
     def get_num_unfinished_requests(self):
         return len(self.request_states)
@@ -573,6 +581,29 @@ class OutputProcessor:
             # Queue the streaming update otherwise.
             req_state.input_chunk_queue.append(update)
 
+    def _publish_diffusion_canvas(
+        self,
+        req_state: RequestState,
+        engine_core_output: EngineCoreOutput,
+    ) -> None:
+        req_state.diffusion_step += 1
+        broadcaster = self.diffusion_event_broadcaster
+        if broadcaster is None or not broadcaster.has_subscribers:
+            # Skip detokenization when nobody is listening.
+            return
+        canvas_token_ids = engine_core_output.diffusion_canvas_token_ids
+        assert canvas_token_ids is not None
+        if self.tokenizer is None:
+            return
+        text = self.tokenizer.decode(canvas_token_ids, skip_special_tokens=True)
+        broadcaster.publish(
+            DiffusionCanvasEvent(
+                request_id=req_state.external_req_id,
+                step=req_state.diffusion_step,
+                text=text,
+            )
+        )
+
     def process_outputs(
         self,
         engine_core_outputs: list[EngineCoreOutput],
@@ -609,6 +640,20 @@ class OutputProcessor:
             if req_state is None:
                 # Ignore output for already-aborted request.
                 continue
+
+            if engine_core_output.diffusion_canvas_token_ids is not None:
+                # Denoising-step output of a diffusion request: publish the
+                # canvas snapshot on the side channel. If the output carries
+                # nothing else (the common case: no tokens were committed this
+                # step), skip the normal completion pipeline.
+                self._publish_diffusion_canvas(req_state, engine_core_output)
+                if (
+                    not engine_core_output.new_token_ids
+                    and engine_core_output.finish_reason is None
+                    and engine_core_output.pooling_output is None
+                    and engine_core_output.kv_transfer_params is None
+                ):
+                    continue
 
             # 1) Compute stats for this iteration.
             self._update_stats_from_output(

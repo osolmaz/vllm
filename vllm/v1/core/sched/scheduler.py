@@ -120,6 +120,12 @@ class Scheduler(SchedulerInterface):
         self.num_sampled_tokens_per_step = (
             1 if not vllm_config.model_config.is_diffusion else 0
         )
+        # Stream intermediate canvas states of diffusion requests to the
+        # frontend on every denoising step (observability side channel).
+        self.stream_diffusion_canvas = (
+            self.num_sampled_tokens_per_step == 0
+            and self.observability_config.diffusion_stream_canvas
+        )
 
         # Create KVConnector for the Scheduler. Note that each Worker
         # will have a corresponding KVConnector with Role=WORKER.
@@ -1572,6 +1578,16 @@ class Scheduler(SchedulerInterface):
             scheduled_spec_token_ids = (
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id)
             )
+            # For diffusion requests, a step that commits no tokens is a pure
+            # denoising step: the scheduled draft tokens are the canvas state
+            # the model denoised in this step. Stream it when enabled.
+            diffusion_canvas_token_ids = None
+            if (
+                self.stream_diffusion_canvas
+                and scheduled_spec_token_ids
+                and not generated_token_ids
+            ):
+                diffusion_canvas_token_ids = scheduled_spec_token_ids
             if scheduled_spec_token_ids and (
                 generated_token_ids or self.num_sampled_tokens_per_step == 0
             ):
@@ -1709,6 +1725,7 @@ class Scheduler(SchedulerInterface):
                 or pooler_output is not None
                 or kv_transfer_params
                 or stopped
+                or diffusion_canvas_token_ids is not None
             ):
                 # Add EngineCoreOutput for this Request.
                 outputs[request.client_index].append(
@@ -1726,6 +1743,7 @@ class Scheduler(SchedulerInterface):
                         trace_headers=request.trace_headers,
                         routed_experts=routed_experts,
                         num_nans_in_logits=request.num_nans_in_logits,
+                        diffusion_canvas_token_ids=diffusion_canvas_token_ids,
                     )
                 )
             else:
