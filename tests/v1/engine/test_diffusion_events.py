@@ -5,9 +5,10 @@ import asyncio
 from dataclasses import dataclass
 
 import pytest
-from transformers import AutoTokenizer
 
 from vllm.sampling_params import RequestOutputKind, SamplingParams
+from vllm.tokenizers import TokenizerLike
+from vllm.tokenizers.hf import CachedHfTokenizer
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest
 from vllm.v1.engine.diffusion_events import (
     DiffusionCanvasEvent,
@@ -23,7 +24,7 @@ _GENERATION_TEXT = " It kept running through the quiet morning field."
 
 @dataclass
 class _Vectors:
-    tokenizer: AutoTokenizer
+    tokenizer: TokenizerLike
     prompt_tokens: list[int]
     prompt_string: str
     generation_tokens: list[int]
@@ -31,7 +32,7 @@ class _Vectors:
 
 @pytest.fixture(scope="module")
 def vectors() -> _Vectors:
-    tokenizer = AutoTokenizer.from_pretrained(_TOKENIZER_NAME)
+    tokenizer = CachedHfTokenizer.from_pretrained(_TOKENIZER_NAME)
     return _Vectors(
         tokenizer=tokenizer,
         prompt_tokens=tokenizer(_PROMPT_TEXT).input_ids,
@@ -138,6 +139,51 @@ async def test_output_processor_publishes_canvas_events(vectors):
         new_token_ids=vectors.generation_tokens[:2],
     )
     output_processor.process_outputs([commit])
+
+
+@pytest.mark.asyncio
+async def test_canvas_placeholder_ids_render_as_placeholder_glyphs(vectors):
+    broadcaster = DiffusionEventBroadcaster()
+    output_processor = OutputProcessor(
+        vectors.tokenizer,
+        log_stats=False,
+        diffusion_event_broadcaster=broadcaster,
+    )
+    request = _make_request("request-0", vectors.prompt_tokens)
+    output_processor.add_request(request, vectors.prompt_string)
+
+    events: list[DiffusionCanvasEvent] = []
+
+    async def consume():
+        async for event in broadcaster.subscribe():
+            events.append(event)
+            break
+
+    task = asyncio.create_task(consume())
+    await asyncio.sleep(0)
+
+    # Canvas positions the sampler has not filled yet arrive as placeholder
+    # ids (e.g. -1); they must render as placeholder glyphs, not crash decode.
+    tokens = vectors.generation_tokens[:4]
+    canvas = [tokens[0], -1, tokens[1], tokens[2], -1, -1, tokens[3]]
+    denoise_step = EngineCoreOutput(
+        request_id=request.request_id,
+        new_token_ids=[],
+        diffusion_canvas_token_ids=canvas,
+    )
+    output_processor.process_outputs([denoise_step])
+    await asyncio.wait_for(task, timeout=5)
+
+    placeholder = OutputProcessor.DIFFUSION_CANVAS_PLACEHOLDER
+    decode = vectors.tokenizer.decode
+    expected = (
+        decode([tokens[0]], skip_special_tokens=True)
+        + placeholder
+        + decode([tokens[1], tokens[2]], skip_special_tokens=True)
+        + placeholder * 2
+        + decode([tokens[3]], skip_special_tokens=True)
+    )
+    assert events[0].text == expected
 
 
 def test_output_processor_skips_detokenization_without_subscribers(vectors):

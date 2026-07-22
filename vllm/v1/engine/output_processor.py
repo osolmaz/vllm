@@ -10,6 +10,7 @@ from typing import Any, cast
 import numpy as np
 import torch
 
+from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.outputs import (
     STREAM_FINISHED,
@@ -41,6 +42,8 @@ from vllm.v1.metrics.stats import (
     RequestStateStats,
     SchedulerStats,
 )
+
+logger = init_logger(__name__)
 
 # shared empty CPU tensor used as a placeholder pooling output
 EMPTY_CPU_TENSOR = torch.empty(0, device="cpu")
@@ -581,6 +584,10 @@ class OutputProcessor:
             # Queue the streaming update otherwise.
             req_state.input_chunk_queue.append(update)
 
+    # Rendered in place of canvas positions holding placeholder ids
+    # (e.g. -1): positions the sampler has not yet filled with a real token.
+    DIFFUSION_CANVAS_PLACEHOLDER = "\u2591"
+
     def _publish_diffusion_canvas(
         self,
         req_state: RequestState,
@@ -595,7 +602,13 @@ class OutputProcessor:
         assert canvas_token_ids is not None
         if self.tokenizer is None:
             return
-        text = self.tokenizer.decode(canvas_token_ids, skip_special_tokens=True)
+        try:
+            text = self._decode_diffusion_canvas(canvas_token_ids)
+        except Exception:
+            # The side channel is best-effort observability; never let it
+            # break request processing.
+            logger.exception("Failed to detokenize diffusion canvas snapshot.")
+            return
         broadcaster.publish(
             DiffusionCanvasEvent(
                 request_id=req_state.external_req_id,
@@ -603,6 +616,23 @@ class OutputProcessor:
                 text=text,
             )
         )
+
+    def _decode_diffusion_canvas(self, canvas_token_ids: list[int]) -> str:
+        assert self.tokenizer is not None
+        max_token_id = self.tokenizer.max_token_id
+        parts: list[str] = []
+        run: list[int] = []
+        for token_id in canvas_token_ids:
+            if 0 <= token_id <= max_token_id:
+                run.append(token_id)
+                continue
+            if run:
+                parts.append(self.tokenizer.decode(run, skip_special_tokens=True))
+                run = []
+            parts.append(self.DIFFUSION_CANVAS_PLACEHOLDER)
+        if run:
+            parts.append(self.tokenizer.decode(run, skip_special_tokens=True))
+        return "".join(parts)
 
     def process_outputs(
         self,
