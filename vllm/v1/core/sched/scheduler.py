@@ -1727,6 +1727,17 @@ class Scheduler(SchedulerInterface):
                 or stopped
                 or diffusion_canvas_token_ids is not None
             ):
+                # A canvas-only output exists purely for the observability
+                # side channel and is dropped before stats processing; leave
+                # request events and prefill stats on the request so the next
+                # real output carries them.
+                canvas_only = (
+                    diffusion_canvas_token_ids is not None
+                    and not new_token_ids
+                    and not stopped
+                    and pooler_output is None
+                    and not kv_transfer_params
+                )
                 # Add EngineCoreOutput for this Request.
                 outputs[request.client_index].append(
                     EngineCoreOutput(
@@ -1737,8 +1748,10 @@ class Scheduler(SchedulerInterface):
                         new_prompt_logprobs_tensors=prompt_logprobs_tensors,
                         pooling_output=pooler_output,
                         stop_reason=request.stop_reason,
-                        events=request.take_events(),
-                        prefill_stats=request.take_prefill_stats(),
+                        events=None if canvas_only else request.take_events(),
+                        prefill_stats=(
+                            None if canvas_only else request.take_prefill_stats()
+                        ),
                         kv_transfer_params=kv_transfer_params,
                         trace_headers=request.trace_headers,
                         routed_experts=routed_experts,

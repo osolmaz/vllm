@@ -136,6 +136,20 @@ class ServeSubcommand(CLISubcommand):
             )
             args.api_server_count = 1
 
+        # The diffusion canvas side channel uses a per-process broadcaster:
+        # a /v1/diffusion/events subscriber only sees requests handled by the
+        # same API server process, so it requires a single API server.
+        if (
+            getattr(args, "diffusion_stream_canvas", False)
+            and args.api_server_count > 1
+        ):
+            logger.warning(
+                "--diffusion-stream-canvas requires a single API server. "
+                "Capping api_server_count from %d to 1.",
+                args.api_server_count,
+            )
+            args.api_server_count = 1
+
         if is_multi_port:
             run_dp_supervisor(args)
         elif args.api_server_count < 1:
