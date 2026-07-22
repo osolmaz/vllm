@@ -1966,13 +1966,19 @@ class Scheduler(SchedulerInterface):
         engine_core_outputs: dict[int, EngineCoreOutputs],
         draft_token_ids: DraftTokenIds,
     ) -> None:
-        """Replace placeholder canvas snapshots with the worker's canvas.
+        """Replace stale or placeholder canvas snapshots with the worker's.
 
-        With async scheduling, scheduled spec tokens are -1 placeholders (the
-        real draft ids are substituted inside the worker process and never
-        reach the scheduler), so the denoise-step outputs built in
-        `update_from_output` hold placeholders. Patch them with the canvas
-        the worker just produced for this step.
+        The canvas placed in the denoise-step outputs by `update_from_output`
+        is the drafts scheduled as input to the step (with async scheduling
+        it is even just -1 placeholders, because the real draft ids are
+        substituted inside the worker and never reach the scheduler). Patch
+        the outputs with the canvas the worker just produced.
+
+        Best-effort: the worker retains only the latest draft buffer, so with
+        `max_concurrent_batches > 1` a request pipelined across in-flight
+        batches may get a canvas one denoising step fresher than the batch
+        being patched, and a request absent from the latest buffer keeps its
+        placeholder snapshot. Acceptable for this observability side channel.
         """
         if not self.stream_diffusion_canvas:
             return

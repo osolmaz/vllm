@@ -34,8 +34,9 @@ class DiffusionEventBroadcaster:
     """Fan-out of diffusion canvas events to SSE subscribers.
 
     publish() is called from the engine output-processing loop and must not
-    block: events for subscribers with a full queue are dropped (each event
-    is a self-contained snapshot).
+    block: when a subscriber's queue is full, the oldest queued snapshot is
+    evicted so a slow consumer always drains toward the current canvas state
+    (each event is a self-contained snapshot).
     """
 
     def __init__(self) -> None:
@@ -47,9 +48,16 @@ class DiffusionEventBroadcaster:
 
     def publish(self, event: DiffusionCanvasEvent) -> None:
         for queue in self._subscribers:
-            # Drop for a full subscriber; the next snapshot supersedes it.
-            with contextlib.suppress(asyncio.QueueFull):
+            try:
                 queue.put_nowait(event)
+            except asyncio.QueueFull:
+                # Evict the oldest snapshot in favor of the newest; both
+                # publish() and the consumer run on the same event loop, so
+                # these two operations cannot race.
+                with contextlib.suppress(asyncio.QueueEmpty):
+                    queue.get_nowait()
+                with contextlib.suppress(asyncio.QueueFull):
+                    queue.put_nowait(event)
 
     async def subscribe(self) -> AsyncIterator[DiffusionCanvasEvent]:
         queue: asyncio.Queue[DiffusionCanvasEvent] = asyncio.Queue(

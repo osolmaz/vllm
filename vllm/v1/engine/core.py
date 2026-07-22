@@ -509,7 +509,21 @@ class EngineCore:
             scheduler_output, model_output
         )
 
-        return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
+        model_executed = scheduler_output.total_num_scheduled_tokens > 0
+        # The canvas placed in the denoise-step outputs is the drafts that
+        # were scheduled as *input* to this step; the canvas this step just
+        # produced still sits in the worker. Take it now to publish fresh
+        # state, and hand the drafts to the scheduler here since the take
+        # below empties the buffer post_step() would otherwise consume.
+        if self.stream_diffusion_canvas and not self.async_scheduling and model_executed:
+            draft_token_ids = self.model_executor.take_draft_token_ids()
+            if draft_token_ids is not None:
+                self.scheduler.update_diffusion_canvas_in_outputs(
+                    engine_core_outputs, draft_token_ids
+                )
+                self.scheduler.update_draft_token_ids(draft_token_ids)
+
+        return engine_core_outputs, model_executed
 
     def post_step(self, model_executed: bool) -> None:
         # When using async scheduling we can't get draft token ids in advance,
@@ -620,6 +634,10 @@ class EngineCore:
                 self.scheduler.update_diffusion_canvas_in_outputs(
                     engine_core_outputs, draft_token_ids
                 )
+                if not self.async_scheduling:
+                    # The take above emptied the buffer post_step() would
+                    # otherwise consume; hand the drafts to the scheduler now.
+                    self.scheduler.update_draft_token_ids(draft_token_ids)
 
         # NOTE(nick): We can either handle the deferred tasks here or save
         # in a field and do it immediately once step_with_batch_queue is

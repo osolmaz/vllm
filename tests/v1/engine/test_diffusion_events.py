@@ -94,6 +94,35 @@ async def test_broadcaster_fanout_and_overflow():
 
 
 @pytest.mark.asyncio
+async def test_broadcaster_evicts_oldest_for_slow_subscriber():
+    """A subscriber that falls behind must drain toward the newest
+    snapshots, not replay the oldest ones."""
+    from vllm.v1.engine import diffusion_events
+
+    broadcaster = DiffusionEventBroadcaster()
+    queue_size = diffusion_events._SUBSCRIBER_QUEUE_SIZE
+
+    received: list[DiffusionCanvasEvent] = []
+
+    async def consume(n: int):
+        async for event in broadcaster.subscribe():
+            received.append(event)
+            if len(received) >= n:
+                break
+
+    task = asyncio.create_task(consume(queue_size))
+    # Let the subscriber register, then overflow its queue before it runs.
+    await asyncio.sleep(0)
+    total = queue_size + 10
+    for step in range(1, total + 1):
+        broadcaster.publish(DiffusionCanvasEvent("req-1", step, f"canvas {step}"))
+    await asyncio.wait_for(task, timeout=5)
+
+    # The oldest 10 snapshots were evicted; the newest survive in order.
+    assert [event.step for event in received] == list(range(11, total + 1))
+
+
+@pytest.mark.asyncio
 async def test_output_processor_publishes_canvas_events(vectors):
     broadcaster = DiffusionEventBroadcaster()
     output_processor = OutputProcessor(
