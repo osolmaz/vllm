@@ -4748,10 +4748,20 @@ class GPUModelRunner(
             assert isinstance(self._draft_token_ids, torch.Tensor)
             self.prev_num_spec_tokens = self._draft_token_ids.shape[1]
         # Check if we need to copy draft tokens to CPU. In async scheduling,
-        # we only copy when needed for structured output, penalties or bad_words.
-        if self.use_async_scheduling and not (
-            scheduler_output.has_structured_output_requests
-            or self.input_batch.sampling_metadata.output_token_ids
+        # we only copy when needed for structured output, penalties or
+        # bad_words - or for diffusion canvas streaming, which needs the real
+        # canvas token ids in the scheduler process on every denoising step.
+        stream_diffusion_canvas = (
+            self.vllm_config.observability_config.diffusion_stream_canvas
+            and self.model_config.is_diffusion
+        )
+        if (
+            self.use_async_scheduling
+            and not stream_diffusion_canvas
+            and not (
+                scheduler_output.has_structured_output_requests
+                or self.input_batch.sampling_metadata.output_token_ids
+            )
         ):
             return
         # We must also set the corresponding request ids.
