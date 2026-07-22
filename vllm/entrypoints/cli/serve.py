@@ -152,13 +152,13 @@ class ServeSubcommand(CLISubcommand):
                     "mode: no API server runs the /v1/diffusion/events "
                     "endpoint."
                 )
-            if is_multi_port:
+            if is_multi_port or is_external_lb or is_hybrid_lb:
                 raise ValueError(
                     "--diffusion-stream-canvas is not supported with "
-                    "multi-port external load balancing: the supervisor "
-                    "starts one API server per DP rank, and a "
-                    "/v1/diffusion/events subscriber would only see the "
-                    "requests handled by its own server."
+                    "external, hybrid, or multi-port data-parallel load "
+                    "balancing: these modes run one API server per DP "
+                    "rank/node, and a /v1/diffusion/events subscriber would "
+                    "only see the requests handled by its own server."
                 )
             if envs.VLLM_RUST_FRONTEND_PATH:
                 raise ValueError(
