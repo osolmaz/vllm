@@ -53,6 +53,12 @@ class ServeSubcommand(CLISubcommand):
             args.model = args.model_tag
 
         if getattr(args, "grpc", False):
+            if getattr(args, "diffusion_stream_canvas", False):
+                raise ValueError(
+                    "--diffusion-stream-canvas is not supported with --grpc: "
+                    "the /v1/diffusion/events endpoint is only served by the "
+                    "FastAPI frontend."
+                )
             from vllm.entrypoints.grpc_server import serve_grpc
 
             uvloop.run(serve_grpc(args))
@@ -140,6 +146,12 @@ class ServeSubcommand(CLISubcommand):
         # a /v1/diffusion/events subscriber only sees requests handled by the
         # same FastAPI process, so it requires the single-process frontend.
         if getattr(args, "diffusion_stream_canvas", False):
+            if args.api_server_count == 0:
+                raise ValueError(
+                    "--diffusion-stream-canvas is not supported in headless "
+                    "mode: no API server runs the /v1/diffusion/events "
+                    "endpoint."
+                )
             if is_multi_port:
                 raise ValueError(
                     "--diffusion-stream-canvas is not supported with "

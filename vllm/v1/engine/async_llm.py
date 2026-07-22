@@ -136,12 +136,11 @@ class AsyncLLM(EngineClient):
         self.input_processor = InputProcessor(self.vllm_config, renderer)
 
         # Diffusion LLMs: side channel broadcasting intermediate canvas
-        # states to /v1/diffusion/events subscribers (opt-in).
+        # states to /v1/diffusion/events subscribers (opt-in). Created
+        # whenever the flag is set so the endpoint exists consistently; for
+        # non-diffusion models it simply never emits events.
         self.diffusion_event_broadcaster: DiffusionEventBroadcaster | None = None
-        if (
-            vllm_config.observability_config.diffusion_stream_canvas
-            and vllm_config.model_config.is_diffusion
-        ):
+        if vllm_config.observability_config.diffusion_stream_canvas:
             self.diffusion_event_broadcaster = DiffusionEventBroadcaster()
 
         # Converts EngineCoreOutputs --> RequestOutput.
