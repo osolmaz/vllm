@@ -61,7 +61,7 @@ the event broadcaster is process-local.
 
 ## Client
 
-The [localpi](https://github.com/dutifuldev/localpi) `--diffusion-canvas`
+The [localpi](https://github.com/osolmaz/localpi) `--diffusion-canvas`
 flag renders these events live in the Pi TUI; the widget is also available
 as a standalone Pi package from the same repository.
 
