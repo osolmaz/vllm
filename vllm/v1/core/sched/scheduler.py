@@ -1961,6 +1961,30 @@ class Scheduler(SchedulerInterface):
                 spec_token_ids = metadata.grammar.validate_tokens(spec_token_ids)  # type: ignore[union-attr]
             request.spec_token_ids = spec_token_ids
 
+    def update_diffusion_canvas_in_outputs(
+        self,
+        engine_core_outputs: dict[int, EngineCoreOutputs],
+        draft_token_ids: DraftTokenIds,
+    ) -> None:
+        """Replace placeholder canvas snapshots with the worker's canvas.
+
+        With async scheduling, scheduled spec tokens are -1 placeholders (the
+        real draft ids are substituted inside the worker process and never
+        reach the scheduler), so the denoise-step outputs built in
+        `update_from_output` hold placeholders. Patch them with the canvas
+        the worker just produced for this step.
+        """
+        if not self.stream_diffusion_canvas:
+            return
+        drafts = dict(zip(draft_token_ids.req_ids, draft_token_ids.draft_token_ids))
+        for outputs in engine_core_outputs.values():
+            for output in outputs.outputs:
+                if output.diffusion_canvas_token_ids is None:
+                    continue
+                fresh = drafts.get(output.request_id)
+                if fresh:
+                    output.diffusion_canvas_token_ids = list(fresh)
+
     def update_draft_token_ids_in_output(
         self, draft_token_ids: DraftTokenIds, scheduler_output: SchedulerOutput
     ) -> None:

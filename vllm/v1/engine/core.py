@@ -160,6 +160,10 @@ class EngineCore:
         self.check_for_draft_tokens = (
             self.use_spec_decode or vllm_config.model_config.is_diffusion
         )
+        self.stream_diffusion_canvas = (
+            vllm_config.observability_config.diffusion_stream_canvas
+            and vllm_config.model_config.is_diffusion
+        )
         if self.scheduler.connector is not None:  # type: ignore
             self.model_executor.init_kv_output_aggregator(self.scheduler.connector)  # type: ignore
 
@@ -606,6 +610,17 @@ class EngineCore:
             scheduler_output, model_output
         )
 
+        # With async scheduling, the scheduler only sees -1 placeholder draft
+        # tokens, so diffusion canvas streaming fetches the real canvas from
+        # the worker to patch the denoise-step outputs. Skip when a deferred
+        # structured-output batch needs the draft tokens below.
+        if self.stream_diffusion_canvas and not deferred_scheduler_output:
+            draft_token_ids = self.model_executor.take_draft_token_ids()
+            if draft_token_ids is not None:
+                self.scheduler.update_diffusion_canvas_in_outputs(
+                    engine_core_outputs, draft_token_ids
+                )
+
         # NOTE(nick): We can either handle the deferred tasks here or save
         # in a field and do it immediately once step_with_batch_queue is
         # re-called. The latter slightly favors TTFT over TPOT/throughput.
@@ -621,6 +636,10 @@ class EngineCore:
                     self.scheduler.update_draft_token_ids_in_output(
                         draft_token_ids, deferred_scheduler_output
                     )
+                    if self.stream_diffusion_canvas:
+                        self.scheduler.update_diffusion_canvas_in_outputs(
+                            engine_core_outputs, draft_token_ids
+                        )
             # We now have the tokens needed to compute the bitmask for the
             # deferred request. Get the bitmask and call sample tokens.
             grammar_output = self.scheduler.get_grammar_bitmask(
