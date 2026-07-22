@@ -215,6 +215,55 @@ async def test_canvas_placeholder_ids_render_as_placeholder_glyphs(vectors):
     assert events[0].text == expected
 
 
+@pytest.mark.asyncio
+async def test_events_endpoint_scopes_stream_to_request_id():
+    """`/v1/diffusion/events?request_id=...` must only deliver events of
+    that request, so clients never receive other clients' canvases."""
+    import json
+    from types import SimpleNamespace
+
+    from vllm.entrypoints.serve.diffusion.api_router import diffusion_events
+
+    broadcaster = DiffusionEventBroadcaster()
+    raw_request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                engine_client=SimpleNamespace(
+                    diffusion_event_broadcaster=broadcaster
+                )
+            )
+        )
+    )
+
+    response = await diffusion_events(raw_request, request_id="req-mine")
+    received: list[dict] = []
+
+    async def consume():
+        async for chunk in response.body_iterator:
+            for line in chunk.splitlines():
+                if line.startswith("data:"):
+                    received.append(json.loads(line[5:]))
+                    if len(received) >= 2:
+                        return
+
+    task = asyncio.create_task(consume())
+    # Wait for the subscriber to register with the broadcaster.
+    for _ in range(100):
+        if broadcaster.has_subscribers:
+            break
+        await asyncio.sleep(0.01)
+    assert broadcaster.has_subscribers
+
+    broadcaster.publish(DiffusionCanvasEvent("req-other", 1, "foreign canvas"))
+    broadcaster.publish(DiffusionCanvasEvent("req-mine", 1, "my canvas a"))
+    broadcaster.publish(DiffusionCanvasEvent("req-other", 2, "foreign canvas"))
+    broadcaster.publish(DiffusionCanvasEvent("req-mine", 2, "my canvas b"))
+    await asyncio.wait_for(task, timeout=5)
+
+    assert [event["request_id"] for event in received] == ["req-mine", "req-mine"]
+    assert [event["text"] for event in received] == ["my canvas a", "my canvas b"]
+
+
 def test_output_processor_skips_detokenization_without_subscribers(vectors):
     broadcaster = DiffusionEventBroadcaster()
     output_processor = OutputProcessor(

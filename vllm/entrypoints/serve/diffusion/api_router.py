@@ -29,7 +29,9 @@ def _broadcaster(request: Request) -> DiffusionEventBroadcaster:
 
 
 @router.get("/v1/diffusion/events")
-async def diffusion_events(raw_request: Request) -> StreamingResponse:
+async def diffusion_events(
+    raw_request: Request, request_id: str | None = None
+) -> StreamingResponse:
     """SSE side channel with intermediate diffusion canvas states.
 
     Each event is a JSON object `{"request_id", "step", "text"}` holding the
@@ -37,11 +39,20 @@ async def diffusion_events(raw_request: Request) -> StreamingResponse:
     for one denoising step. Committed tokens keep flowing through the normal
     OpenAI-compatible completion stream; this endpoint only exposes the
     intermediate states for observability and visualization.
+
+    The optional `request_id` query parameter scopes the stream to a single
+    request. Clients that set the `X-Request-Id` header on their completion
+    request know the id (`chatcmpl-<header>`) up front and should subscribe
+    scoped, so they never receive canvas states of other clients' requests.
+    An unscoped subscription streams every request on the server and is
+    intended for server-side observability.
     """
     broadcaster = _broadcaster(raw_request)
 
     async def event_stream():
         async for event in broadcaster.subscribe():
+            if request_id is not None and event.request_id != request_id:
+                continue
             payload = json.dumps(
                 {
                     "request_id": event.request_id,
