@@ -64,8 +64,9 @@ class ObservabilityConfig:
     OpenAI-compatible completion stream; this side channel exists for
     observability and visualization, and its snapshots are best-effort: with
     async scheduling, a snapshot may occasionally be one denoising step
-    fresher than the step it is published for. Requires the single-process
-    FastAPI frontend. Has no effect for non-diffusion models."""
+    fresher than the step it is published for. Setting this flag requires
+    the single-process FastAPI frontend, regardless of the model; for
+    non-diffusion models the endpoint exists but emits no events."""
 
     enable_layerwise_nvtx_tracing: bool = False
     """Enable layerwise NVTX tracing. This traces the execution of each layer or
