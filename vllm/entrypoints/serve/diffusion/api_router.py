@@ -34,11 +34,14 @@ async def diffusion_events(
 ) -> StreamingResponse:
     """SSE side channel with intermediate diffusion canvas states.
 
-    Each event is a JSON object `{"request_id", "step", "text"}` holding the
-    detokenized canvas (partially denoised token block) that was scheduled
-    for one denoising step. Committed tokens keep flowing through the normal
-    OpenAI-compatible completion stream; this endpoint only exposes the
-    intermediate states for observability and visualization.
+    Each event is a JSON object `{"request_id", "step", "block", "text"}`
+    holding the detokenized canvas (partially denoised token block) that was
+    scheduled for one denoising step; `block` is the commit ordinal of that
+    block, letting clients discard snapshots of an already-committed block
+    that raced the commit on this separate connection. Committed tokens keep
+    flowing through the normal OpenAI-compatible completion stream; this
+    endpoint only exposes the intermediate states for observability and
+    visualization.
 
     The optional `request_id` query parameter scopes the stream to a single
     request. Clients that set the `X-Request-Id` header on their completion
@@ -57,6 +60,7 @@ async def diffusion_events(
                 {
                     "request_id": event.request_id,
                     "step": event.step,
+                    "block": event.block,
                     "text": event.text,
                 }
             )

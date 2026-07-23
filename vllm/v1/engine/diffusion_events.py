@@ -23,10 +23,15 @@ class DiffusionCanvasEvent:
     `text` is the detokenized canvas scheduled for a denoising step: accepted
     tokens mixed with the sampler's renoise tokens. `step` counts denoising
     steps observed for the request since the frontend started tracking it.
+    `block` is the commit ordinal of the block the snapshot belongs to (how
+    many commits the request had streamed when it was taken): the canvas feed
+    and the completion stream travel on separate connections, so clients use
+    it to discard snapshots of a block whose commit they already received.
     """
 
     request_id: str
     step: int
+    block: int
     text: str
 
 

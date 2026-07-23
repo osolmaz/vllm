@@ -80,8 +80,8 @@ async def test_broadcaster_fanout_and_overflow():
     await asyncio.sleep(0)
     assert broadcaster.has_subscribers
 
-    broadcaster.publish(DiffusionCanvasEvent("req-1", 1, "noise a"))
-    broadcaster.publish(DiffusionCanvasEvent("req-1", 2, "noise b"))
+    broadcaster.publish(DiffusionCanvasEvent("req-1", 1, 0, "noise a"))
+    broadcaster.publish(DiffusionCanvasEvent("req-1", 2, 0, "noise b"))
     await asyncio.wait_for(task, timeout=5)
 
     assert [event.step for event in received] == [1, 2]
@@ -90,7 +90,7 @@ async def test_broadcaster_fanout_and_overflow():
     # Subscriber went away; publishing must not raise.
     await asyncio.sleep(0)
     assert not broadcaster.has_subscribers
-    broadcaster.publish(DiffusionCanvasEvent("req-1", 3, "noise c"))
+    broadcaster.publish(DiffusionCanvasEvent("req-1", 3, 0, "noise c"))
 
 
 @pytest.mark.asyncio
@@ -115,7 +115,7 @@ async def test_broadcaster_evicts_oldest_for_slow_subscriber():
     await asyncio.sleep(0)
     total = queue_size + 10
     for step in range(1, total + 1):
-        broadcaster.publish(DiffusionCanvasEvent("req-1", step, f"canvas {step}"))
+        broadcaster.publish(DiffusionCanvasEvent("req-1", step, 0, f"canvas {step}"))
     await asyncio.wait_for(task, timeout=5)
 
     # The oldest 10 snapshots were evicted; the newest survive in order.
@@ -158,16 +158,26 @@ async def test_output_processor_publishes_canvas_events(vectors):
     await asyncio.wait_for(task, timeout=5)
 
     assert [event.step for event in events] == [1, 2]
+    assert [event.block for event in events] == [0, 0]
     assert events[0].request_id == "request-0"
     expected_text = vectors.tokenizer.decode(canvas, skip_special_tokens=True)
     assert events[0].text == expected_text
 
-    # A commit step (real tokens, no canvas) flows through the normal path.
+    # A commit step (real tokens, no canvas) flows through the normal path
+    # and advances the block ordinal: snapshots after it belong to the next
+    # block, so clients can discard stale snapshots of the committed one.
     commit = EngineCoreOutput(
         request_id=request.request_id,
         new_token_ids=vectors.generation_tokens[:2],
     )
     output_processor.process_outputs([commit])
+
+    task = asyncio.create_task(consume(3))
+    await asyncio.sleep(0)
+    output_processor.process_outputs([denoise_step])
+    await asyncio.wait_for(task, timeout=5)
+    assert events[2].step == 3
+    assert events[2].block == 1
 
 
 @pytest.mark.asyncio
@@ -254,10 +264,10 @@ async def test_events_endpoint_scopes_stream_to_request_id():
         await asyncio.sleep(0.01)
     assert broadcaster.has_subscribers
 
-    broadcaster.publish(DiffusionCanvasEvent("req-other", 1, "foreign canvas"))
-    broadcaster.publish(DiffusionCanvasEvent("req-mine", 1, "my canvas a"))
-    broadcaster.publish(DiffusionCanvasEvent("req-other", 2, "foreign canvas"))
-    broadcaster.publish(DiffusionCanvasEvent("req-mine", 2, "my canvas b"))
+    broadcaster.publish(DiffusionCanvasEvent("req-other", 1, 0, "foreign canvas"))
+    broadcaster.publish(DiffusionCanvasEvent("req-mine", 1, 0, "my canvas a"))
+    broadcaster.publish(DiffusionCanvasEvent("req-other", 2, 0, "foreign canvas"))
+    broadcaster.publish(DiffusionCanvasEvent("req-mine", 2, 0, "my canvas b"))
     await asyncio.wait_for(task, timeout=5)
 
     assert [event["request_id"] for event in received] == ["req-mine", "req-mine"]

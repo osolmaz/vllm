@@ -17,7 +17,7 @@ no compilation happens:
 ```bash
 VLLM_USE_PRECOMPILED=1 \
 VLLM_PRECOMPILED_WHEEL_COMMIT=4e5ca89cfe98121642d76b40e32a006f4d0fbf3b \
-pip install git+https://github.com/osolmaz/vllm@canvas-v0.23.1rc2
+pip install git+https://github.com/osolmaz/vllm@canvas-v0.23.1rc3
 ```
 
 `VLLM_PRECOMPILED_WHEEL_COMMIT` must stay in sync with the upstream base
@@ -42,13 +42,19 @@ vllm serve nvidia/diffusiongemma-26B-A4B-it-NVFP4 \
 JSON object:
 
 ```json
-{"request_id": "chatcmpl-...", "step": 12, "text": "partially denoised canvas ..."}
+{"request_id": "chatcmpl-...", "step": 12, "block": 0, "text": "partially denoised canvas ..."}
 ```
 
 - `text` is the detokenized canvas scheduled for one denoising step: accepted
   tokens mixed with the sampler's renoise tokens. Unfilled positions render
   as `░`.
-- `step` counts denoising steps observed for the request.
+- `step` counts denoising steps observed for the request (monotonic across
+  blocks, not per block).
+- `block` is the commit ordinal of the block the snapshot belongs to (the
+  number of commits the request has streamed so far). The canvas feed and
+  the completion stream travel on separate connections, so clients should
+  discard snapshots whose `block` is at or below the ordinal of a commit
+  they have already received; rendering one would duplicate committed text.
 - Pass `?request_id=<id>` to scope the stream to a single request; clients
   that set the `X-Request-Id` header on their completion request know the id
   (`chatcmpl-<header>`) up front and should subscribe scoped. An unscoped

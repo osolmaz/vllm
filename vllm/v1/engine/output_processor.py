@@ -179,8 +179,11 @@ class RequestState:
         self.is_prefilling = True
         self.queue = queue
         self.num_cached_tokens = 0
-        # Diffusion LLMs: denoising steps observed for this request.
+        # Diffusion LLMs: denoising steps observed for this request, and the
+        # number of commits it has streamed (the block ordinal of the canvas
+        # currently being denoised).
         self.diffusion_step = 0
+        self.diffusion_block = 0
 
         self.stats = RequestStateStats(arrival_time=arrival_time) if log_stats else None
 
@@ -613,6 +616,7 @@ class OutputProcessor:
             DiffusionCanvasEvent(
                 request_id=req_state.external_req_id,
                 step=req_state.diffusion_step,
+                block=req_state.diffusion_block,
                 text=text,
             )
         )
@@ -684,6 +688,16 @@ class OutputProcessor:
                     and engine_core_output.kv_transfer_params is None
                 ):
                     continue
+
+            if (
+                self.diffusion_event_broadcaster is not None
+                and engine_core_output.new_token_ids
+            ):
+                # Tokens committed: subsequent canvas snapshots belong to the
+                # next block. The ordinal lets clients discard snapshots of an
+                # already-committed block that raced the commit chunk on the
+                # side channel's separate connection.
+                req_state.diffusion_block += 1
 
             # 1) Compute stats for this iteration.
             self._update_stats_from_output(
