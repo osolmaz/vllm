@@ -17,7 +17,7 @@ no compilation happens:
 ```bash
 VLLM_USE_PRECOMPILED=1 \
 VLLM_PRECOMPILED_WHEEL_COMMIT=4e5ca89cfe98121642d76b40e32a006f4d0fbf3b \
-pip install git+https://github.com/osolmaz/vllm@canvas-v0.23.1rc3
+pip install git+https://github.com/osolmaz/vllm@canvas-v0.23.1rc4
 ```
 
 `VLLM_PRECOMPILED_WHEEL_COMMIT` must stay in sync with the upstream base
