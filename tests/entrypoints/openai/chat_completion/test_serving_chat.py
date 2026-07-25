@@ -29,6 +29,7 @@ from vllm.entrypoints.openai.chat_completion.serving import (
     _make_prompt_tokens_details,
 )
 from vllm.entrypoints.openai.engine.protocol import (
+    DeltaMessage,
     ErrorResponse,
     RequestResponseMetadata,
 )
@@ -2127,3 +2128,121 @@ async def test_streaming_n_gt1_independent_tool_parsers():
             f"Choice {choice_idx}: expected finish_reason='tool_calls', "
             f"got '{reasons[0]}'"
         )
+
+
+@pytest.mark.asyncio
+async def test_streaming_splits_combined_reasoning_and_content_delta():
+    """A parsed delta carrying both reasoning and content must stream as two
+    chunks with the reasoning chunk first.
+
+    Diffusion-style block commits can deliver an entire thought plus the
+    start of the answer in a single engine output, so the parser produces one
+    DeltaMessage with both fields set. Clients that assemble message blocks
+    in arrival order would otherwise place the thinking block after the
+    answer text.
+    """
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
+
+    serving_chat = _build_serving_chat(mock_engine)
+
+    class CombinedDeltaParser:
+        def __init__(self, tokenizer, tools=None, **kwargs):
+            del tokenizer, tools, kwargs
+
+        def parse_delta(
+            self,
+            *,
+            delta_text,
+            delta_token_ids,
+            request,
+            prompt_token_ids,
+            finished,
+        ):
+            del delta_text, delta_token_ids, request, prompt_token_ids
+            if finished:
+                return DeltaMessage()
+            return DeltaMessage(reasoning="a short plan", content="Four")
+
+    serving_chat.parser_cls = CombinedDeltaParser
+
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "What is 2+2?"}],
+        stream=True,
+    )
+
+    async def result_generator():
+        yield RequestOutput(
+            request_id="test-req",
+            prompt="test",
+            prompt_token_ids=[1, 2, 3],
+            prompt_logprobs=None,
+            outputs=[
+                CompletionOutput(
+                    index=0,
+                    text="a short plan Four",
+                    token_ids=[4, 5, 6],
+                    cumulative_logprob=0.0,
+                    logprobs=None,
+                )
+            ],
+            finished=False,
+        )
+        yield RequestOutput(
+            request_id="test-req",
+            prompt="test",
+            prompt_token_ids=[1, 2, 3],
+            prompt_logprobs=None,
+            outputs=[
+                CompletionOutput(
+                    index=0,
+                    text="",
+                    token_ids=[],
+                    cumulative_logprob=0.0,
+                    logprobs=None,
+                    finish_reason="stop",
+                )
+            ],
+            finished=True,
+        )
+
+    events: list[tuple[str, str]] = []
+    combined_deltas = 0
+    async for chunk_str in serving_chat.chat_completion_stream_generator(
+        request=request,
+        result_generator=result_generator(),
+        request_id="test-req",
+        model_name=MODEL_NAME,
+        conversation=[],
+        tokenizer=get_tokenizer(MODEL_NAME),
+        request_metadata=RequestResponseMetadata(
+            request_id="test-req",
+            model_name=MODEL_NAME,
+        ),
+    ):
+        if not chunk_str.startswith("data: ") or "data: [DONE]" in chunk_str:
+            continue
+        data = json.loads(chunk_str[6:].strip())
+        for choice in data.get("choices", []):
+            delta = choice.get("delta", {})
+            if delta.get("reasoning") and delta.get("content"):
+                combined_deltas += 1
+            if delta.get("reasoning"):
+                events.append(("reasoning", delta["reasoning"]))
+            if delta.get("content"):
+                events.append(("content", delta["content"]))
+
+    assert ("reasoning", "a short plan") in events
+    assert ("content", "Four") in events
+    reasoning_idx = events.index(("reasoning", "a short plan"))
+    content_idx = events.index(("content", "Four"))
+    assert reasoning_idx < content_idx, (
+        f"reasoning must stream before content, got order: {events}"
+    )
+    assert combined_deltas == 0, (
+        "combined reasoning+content deltas must be split into separate chunks"
+    )
