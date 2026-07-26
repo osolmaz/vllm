@@ -10,6 +10,7 @@ from typing import Any, cast
 import numpy as np
 import torch
 
+from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.outputs import (
     STREAM_FINISHED,
@@ -29,6 +30,10 @@ from vllm.tracing import (
 from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
 from vllm.v1.engine.detokenizer import IncrementalDetokenizer
+from vllm.v1.engine.diffusion_events import (
+    DiffusionCanvasEvent,
+    DiffusionEventBroadcaster,
+)
 from vllm.v1.engine.logprobs import LogprobsProcessor
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.metrics.stats import (
@@ -37,6 +42,8 @@ from vllm.v1.metrics.stats import (
     RequestStateStats,
     SchedulerStats,
 )
+
+logger = init_logger(__name__)
 
 # shared empty CPU tensor used as a placeholder pooling output
 EMPTY_CPU_TENSOR = torch.empty(0, device="cpu")
@@ -172,6 +179,11 @@ class RequestState:
         self.is_prefilling = True
         self.queue = queue
         self.num_cached_tokens = 0
+        # Diffusion LLMs: denoising steps observed for this request, and the
+        # number of commits it has streamed (the block ordinal of the canvas
+        # currently being denoised).
+        self.diffusion_step = 0
+        self.diffusion_block = 0
 
         self.stats = RequestStateStats(arrival_time=arrival_time) if log_stats else None
 
@@ -424,6 +436,7 @@ class OutputProcessor:
         log_stats: bool,
         stream_interval: int = 1,
         tracing_enabled: bool = False,
+        diffusion_event_broadcaster: DiffusionEventBroadcaster | None = None,
     ):
         self.log_stats = log_stats
         self.tokenizer = tokenizer
@@ -433,6 +446,7 @@ class OutputProcessor:
         self.external_req_ids: defaultdict[str, list[str]] = defaultdict(list)
         self.lora_states = LoRARequestStates(log_stats)
         self.tracing_enabled = tracing_enabled
+        self.diffusion_event_broadcaster = diffusion_event_broadcaster
 
     def get_num_unfinished_requests(self):
         return len(self.request_states)
@@ -573,6 +587,57 @@ class OutputProcessor:
             # Queue the streaming update otherwise.
             req_state.input_chunk_queue.append(update)
 
+    # Rendered in place of canvas positions holding placeholder ids
+    # (e.g. -1): positions the sampler has not yet filled with a real token.
+    DIFFUSION_CANVAS_PLACEHOLDER = "\u2591"
+
+    def _publish_diffusion_canvas(
+        self,
+        req_state: RequestState,
+        engine_core_output: EngineCoreOutput,
+    ) -> None:
+        req_state.diffusion_step += 1
+        broadcaster = self.diffusion_event_broadcaster
+        if broadcaster is None or not broadcaster.has_subscribers:
+            # Skip detokenization when nobody is listening.
+            return
+        canvas_token_ids = engine_core_output.diffusion_canvas_token_ids
+        assert canvas_token_ids is not None
+        if self.tokenizer is None:
+            return
+        try:
+            text = self._decode_diffusion_canvas(canvas_token_ids)
+        except Exception:
+            # The side channel is best-effort observability; never let it
+            # break request processing.
+            logger.exception("Failed to detokenize diffusion canvas snapshot.")
+            return
+        broadcaster.publish(
+            DiffusionCanvasEvent(
+                request_id=req_state.external_req_id,
+                step=req_state.diffusion_step,
+                block=req_state.diffusion_block,
+                text=text,
+            )
+        )
+
+    def _decode_diffusion_canvas(self, canvas_token_ids: list[int]) -> str:
+        assert self.tokenizer is not None
+        max_token_id = self.tokenizer.max_token_id
+        parts: list[str] = []
+        run: list[int] = []
+        for token_id in canvas_token_ids:
+            if 0 <= token_id <= max_token_id:
+                run.append(token_id)
+                continue
+            if run:
+                parts.append(self.tokenizer.decode(run, skip_special_tokens=True))
+                run = []
+            parts.append(self.DIFFUSION_CANVAS_PLACEHOLDER)
+        if run:
+            parts.append(self.tokenizer.decode(run, skip_special_tokens=True))
+        return "".join(parts)
+
     def process_outputs(
         self,
         engine_core_outputs: list[EngineCoreOutput],
@@ -609,6 +674,30 @@ class OutputProcessor:
             if req_state is None:
                 # Ignore output for already-aborted request.
                 continue
+
+            if engine_core_output.diffusion_canvas_token_ids is not None:
+                # Denoising-step output of a diffusion request: publish the
+                # canvas snapshot on the side channel. If the output carries
+                # nothing else (the common case: no tokens were committed this
+                # step), skip the normal completion pipeline.
+                self._publish_diffusion_canvas(req_state, engine_core_output)
+                if (
+                    not engine_core_output.new_token_ids
+                    and engine_core_output.finish_reason is None
+                    and engine_core_output.pooling_output is None
+                    and engine_core_output.kv_transfer_params is None
+                ):
+                    continue
+
+            if (
+                self.diffusion_event_broadcaster is not None
+                and engine_core_output.new_token_ids
+            ):
+                # Tokens committed: subsequent canvas snapshots belong to the
+                # next block. The ordinal lets clients discard snapshots of an
+                # already-committed block that raced the commit chunk on the
+                # side channel's separate connection.
+                req_state.diffusion_block += 1
 
             # 1) Compute stats for this iteration.
             self._update_stats_from_output(

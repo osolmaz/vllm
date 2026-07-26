@@ -120,6 +120,12 @@ class Scheduler(SchedulerInterface):
         self.num_sampled_tokens_per_step = (
             1 if not vllm_config.model_config.is_diffusion else 0
         )
+        # Stream intermediate canvas states of diffusion requests to the
+        # frontend on every denoising step (observability side channel).
+        self.stream_diffusion_canvas = (
+            self.num_sampled_tokens_per_step == 0
+            and self.observability_config.diffusion_stream_canvas
+        )
 
         # Create KVConnector for the Scheduler. Note that each Worker
         # will have a corresponding KVConnector with Role=WORKER.
@@ -1572,6 +1578,16 @@ class Scheduler(SchedulerInterface):
             scheduled_spec_token_ids = (
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id)
             )
+            # For diffusion requests, a step that commits no tokens is a pure
+            # denoising step: the scheduled draft tokens are the canvas state
+            # the model denoised in this step. Stream it when enabled.
+            diffusion_canvas_token_ids = None
+            if (
+                self.stream_diffusion_canvas
+                and scheduled_spec_token_ids
+                and not generated_token_ids
+            ):
+                diffusion_canvas_token_ids = scheduled_spec_token_ids
             if scheduled_spec_token_ids and (
                 generated_token_ids or self.num_sampled_tokens_per_step == 0
             ):
@@ -1709,7 +1725,19 @@ class Scheduler(SchedulerInterface):
                 or pooler_output is not None
                 or kv_transfer_params
                 or stopped
+                or diffusion_canvas_token_ids is not None
             ):
+                # A canvas-only output exists purely for the observability
+                # side channel and is dropped before stats processing; leave
+                # request events and prefill stats on the request so the next
+                # real output carries them.
+                canvas_only = (
+                    diffusion_canvas_token_ids is not None
+                    and not new_token_ids
+                    and not stopped
+                    and pooler_output is None
+                    and not kv_transfer_params
+                )
                 # Add EngineCoreOutput for this Request.
                 outputs[request.client_index].append(
                     EngineCoreOutput(
@@ -1720,12 +1748,15 @@ class Scheduler(SchedulerInterface):
                         new_prompt_logprobs_tensors=prompt_logprobs_tensors,
                         pooling_output=pooler_output,
                         stop_reason=request.stop_reason,
-                        events=request.take_events(),
-                        prefill_stats=request.take_prefill_stats(),
+                        events=None if canvas_only else request.take_events(),
+                        prefill_stats=(
+                            None if canvas_only else request.take_prefill_stats()
+                        ),
                         kv_transfer_params=kv_transfer_params,
                         trace_headers=request.trace_headers,
                         routed_experts=routed_experts,
                         num_nans_in_logits=request.num_nans_in_logits,
+                        diffusion_canvas_token_ids=diffusion_canvas_token_ids,
                     )
                 )
             else:
@@ -1942,6 +1973,36 @@ class Scheduler(SchedulerInterface):
                 metadata = request.structured_output_request
                 spec_token_ids = metadata.grammar.validate_tokens(spec_token_ids)  # type: ignore[union-attr]
             request.spec_token_ids = spec_token_ids
+
+    def update_diffusion_canvas_in_outputs(
+        self,
+        engine_core_outputs: dict[int, EngineCoreOutputs],
+        draft_token_ids: DraftTokenIds,
+    ) -> None:
+        """Replace stale or placeholder canvas snapshots with the worker's.
+
+        The canvas placed in the denoise-step outputs by `update_from_output`
+        is the drafts scheduled as input to the step (with async scheduling
+        it is even just -1 placeholders, because the real draft ids are
+        substituted inside the worker and never reach the scheduler). Patch
+        the outputs with the canvas the worker just produced.
+
+        Best-effort: the worker retains only the latest draft buffer, so with
+        `max_concurrent_batches > 1` a request pipelined across in-flight
+        batches may get a canvas one denoising step fresher than the batch
+        being patched, and a request absent from the latest buffer keeps its
+        placeholder snapshot. Acceptable for this observability side channel.
+        """
+        if not self.stream_diffusion_canvas:
+            return
+        drafts = dict(zip(draft_token_ids.req_ids, draft_token_ids.draft_token_ids))
+        for outputs in engine_core_outputs.values():
+            for output in outputs.outputs:
+                if output.diffusion_canvas_token_ids is None:
+                    continue
+                fresh = drafts.get(output.request_id)
+                if fresh:
+                    output.diffusion_canvas_token_ids = list(fresh)
 
     def update_draft_token_ids_in_output(
         self, draft_token_ids: DraftTokenIds, scheduler_output: SchedulerOutput

@@ -9,8 +9,16 @@ from vllm.v1.worker.gpu.input_batch import InputBatch
 
 
 class DraftTokensHandler:
-    def __init__(self, device: torch.device | None = None):
+    def __init__(
+        self,
+        device: torch.device | None = None,
+        always_copy: bool = False,
+    ):
         self.device = device
+        # Copy draft tokens back to the CPU on every step even without
+        # structured-output validation (e.g. diffusion canvas streaming needs
+        # the real canvas token ids in the scheduler process).
+        self.always_copy = always_copy
         self.copy_stream = torch.cuda.Stream(device)
         self.copy_event = torch.Event()
 
@@ -23,7 +31,7 @@ class DraftTokensHandler:
     ) -> None:
         self.req_ids = input_batch.req_ids
         self.num_draft_tokens = draft_tokens.shape[1]
-        if not input_batch.has_structured_output_reqs:
+        if not (input_batch.has_structured_output_reqs or self.always_copy):
             # No draft token validation needs to be performed by
             # the scheduler for this batch.
             self.draft_tokens_np = None

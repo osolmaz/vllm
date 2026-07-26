@@ -660,6 +660,36 @@ class OpenAIServingChat(OpenAIServing):
                                 delta=True,
                             )
 
+                    # Diffusion-style block commits can place an entire
+                    # thought plus the start of the answer in one parsed
+                    # delta. Emit the reasoning in its own chunk first so
+                    # clients that assemble blocks in arrival order keep
+                    # reasoning ahead of content and tool calls.
+                    if delta_message.reasoning and (
+                        delta_message.content or delta_message.tool_calls
+                    ):
+                        reasoning_chunk = ChatCompletionStreamResponse(
+                            id=request_id,
+                            object=chunk_object_type,
+                            created=created_time,
+                            choices=[
+                                ChatCompletionResponseStreamChoice(
+                                    index=i,
+                                    delta=DeltaMessage(
+                                        reasoning=delta_message.reasoning
+                                    ),
+                                    logprobs=None,
+                                    finish_reason=None,
+                                )
+                            ],
+                            model=model_name,
+                        )
+                        reasoning_data = reasoning_chunk.model_dump_json(
+                            exclude_unset=True
+                        )
+                        yield f"data: {reasoning_data}\n\n"
+                        delta_message.reasoning = None
+
                     if output.finish_reason is None:
                         # Send token-by-token response for each request.n
                         choice_data = ChatCompletionResponseStreamChoice(

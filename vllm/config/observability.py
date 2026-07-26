@@ -57,6 +57,17 @@ class ObservabilityConfig:
     """Enable CUDA graph metrics (number of padded/unpadded tokens, runtime cudagraph
     dispatch modes, and their observed frequencies at every logging interval)."""
 
+    diffusion_stream_canvas: bool = False
+    """For diffusion LLMs, stream intermediate canvas states (the partially
+    denoised token block) of denoising steps over the `/v1/diffusion/events`
+    SSE endpoint. Intermediate canvas tokens are not part of the
+    OpenAI-compatible completion stream; this side channel exists for
+    observability and visualization, and its snapshots are best-effort: with
+    async scheduling, a snapshot may occasionally be one denoising step
+    fresher than the step it is published for. Setting this flag requires
+    the single-process FastAPI frontend, regardless of the model; for
+    non-diffusion models the endpoint exists but emits no events."""
+
     enable_layerwise_nvtx_tracing: bool = False
     """Enable layerwise NVTX tracing. This traces the execution of each layer or
     module in the model and attach information such as input/output shapes to

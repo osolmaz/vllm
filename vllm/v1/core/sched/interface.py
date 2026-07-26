@@ -130,6 +130,21 @@ class SchedulerInterface(ABC):
         """
         raise NotImplementedError
 
+    def update_diffusion_canvas_in_outputs(
+        self,
+        engine_core_outputs: dict[int, "EngineCoreOutputs"],
+        draft_token_ids: "DraftTokenIds",
+    ) -> None:
+        """Patch diffusion canvas snapshots in engine core outputs with the
+        draft token ids (the canvas) the worker produced for this step. Only
+        relevant when diffusion canvas streaming is enabled; no-op otherwise.
+
+        Args:
+            engine_core_outputs: The outputs built by `update_from_output`.
+            draft_token_ids: The canvas token ids for each request.
+        """
+        return None
+
     @abstractmethod
     def add_request(self, request: "Request") -> None:
         """Add a new request to the scheduler's internal queue.

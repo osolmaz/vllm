@@ -202,8 +202,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         "is not supported."
                     )
 
-        # Draft tokens propagation - for spec-dec + struct outputs.
-        self.draft_tokens_handler = DraftTokensHandler(self.device)
+        # Draft tokens propagation - for spec-dec + struct outputs, and for
+        # diffusion canvas streaming (which needs the real canvas token ids
+        # in the scheduler process on every denoising step).
+        self.draft_tokens_handler = DraftTokensHandler(
+            self.device,
+            always_copy=(
+                vllm_config.observability_config.diffusion_stream_canvas
+                and self.model_config.is_diffusion
+            ),
+        )
 
         # Pooling models.
         self.is_pooling_model = self.model_config.runner_type == "pooling"

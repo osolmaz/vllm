@@ -79,7 +79,7 @@ from vllm.v1.engine.utils import (
 from vllm.v1.executor import Executor
 from vllm.v1.kv_cache_interface import KVCacheConfig, get_kv_cache_spec_kind
 from vllm.v1.metrics.stats import SchedulerStats
-from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 from vllm.v1.structured_output import StructuredOutputManager
@@ -160,6 +160,13 @@ class EngineCore:
         self.check_for_draft_tokens = (
             self.use_spec_decode or vllm_config.model_config.is_diffusion
         )
+        self.stream_diffusion_canvas = (
+            vllm_config.observability_config.diffusion_stream_canvas
+            and vllm_config.model_config.is_diffusion
+        )
+        # Drafts taken early for canvas streaming in the sync scheduling
+        # paths, pending application by post_step().
+        self._taken_draft_token_ids: DraftTokenIds | None = None
         if self.scheduler.connector is not None:  # type: ignore
             self.model_executor.init_kv_output_aggregator(self.scheduler.connector)  # type: ignore
 
@@ -505,14 +512,34 @@ class EngineCore:
             scheduler_output, model_output
         )
 
-        return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
+        model_executed = scheduler_output.total_num_scheduled_tokens > 0
+        # The canvas placed in the denoise-step outputs is the drafts that
+        # were scheduled as *input* to this step; the canvas this step just
+        # produced still sits in the worker. Take it now to publish fresh
+        # state; post_step() reuses the taken drafts instead of paying for a
+        # second worker round-trip.
+        if self.stream_diffusion_canvas and not self.async_scheduling and model_executed:
+            draft_token_ids = self.model_executor.take_draft_token_ids()
+            if draft_token_ids is not None:
+                self.scheduler.update_diffusion_canvas_in_outputs(
+                    engine_core_outputs, draft_token_ids
+                )
+                self._taken_draft_token_ids = draft_token_ids
+
+        return engine_core_outputs, model_executed
 
     def post_step(self, model_executed: bool) -> None:
         # When using async scheduling we can't get draft token ids in advance,
         # so we update draft token ids in the worker process and don't
         # need to update draft token ids here.
         if self.check_for_draft_tokens and not self.async_scheduling and model_executed:
-            draft_token_ids = self.model_executor.take_draft_token_ids()
+            # Reuse drafts already taken this step for diffusion canvas
+            # streaming; taking again would redo the GPU sync and worker RPC
+            # only to return the same drafts.
+            draft_token_ids = self._taken_draft_token_ids
+            self._taken_draft_token_ids = None
+            if draft_token_ids is None:
+                draft_token_ids = self.model_executor.take_draft_token_ids()
             if draft_token_ids is not None:
                 self.scheduler.update_draft_token_ids(draft_token_ids)
 
@@ -606,6 +633,21 @@ class EngineCore:
             scheduler_output, model_output
         )
 
+        # With async scheduling, the scheduler only sees -1 placeholder draft
+        # tokens, so diffusion canvas streaming fetches the real canvas from
+        # the worker to patch the denoise-step outputs. Skip when a deferred
+        # structured-output batch needs the draft tokens below.
+        if self.stream_diffusion_canvas and not deferred_scheduler_output:
+            draft_token_ids = self.model_executor.take_draft_token_ids()
+            if draft_token_ids is not None:
+                self.scheduler.update_diffusion_canvas_in_outputs(
+                    engine_core_outputs, draft_token_ids
+                )
+                if not self.async_scheduling:
+                    # Let post_step() apply the drafts without paying for a
+                    # second worker round-trip.
+                    self._taken_draft_token_ids = draft_token_ids
+
         # NOTE(nick): We can either handle the deferred tasks here or save
         # in a field and do it immediately once step_with_batch_queue is
         # re-called. The latter slightly favors TTFT over TPOT/throughput.
@@ -621,6 +663,10 @@ class EngineCore:
                     self.scheduler.update_draft_token_ids_in_output(
                         draft_token_ids, deferred_scheduler_output
                     )
+                    if self.stream_diffusion_canvas:
+                        self.scheduler.update_diffusion_canvas_in_outputs(
+                            engine_core_outputs, draft_token_ids
+                        )
             # We now have the tokens needed to compute the bitmask for the
             # deferred request. Get the bitmask and call sample tokens.
             grammar_output = self.scheduler.get_grammar_bitmask(

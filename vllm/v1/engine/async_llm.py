@@ -39,6 +39,7 @@ from vllm.utils.async_utils import cancel_task_threadsafe
 from vllm.utils.collection_utils import as_list
 from vllm.v1.engine import EngineCoreRequest, PauseMode
 from vllm.v1.engine.core_client import EngineCoreClient
+from vllm.v1.engine.diffusion_events import DiffusionEventBroadcaster
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
 from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.engine.output_processor import OutputProcessor, RequestOutputCollector
@@ -134,12 +135,21 @@ class AsyncLLM(EngineClient):
         # Convert EngineInput --> EngineCoreRequest.
         self.input_processor = InputProcessor(self.vllm_config, renderer)
 
+        # Diffusion LLMs: side channel broadcasting intermediate canvas
+        # states to /v1/diffusion/events subscribers (opt-in). Created
+        # whenever the flag is set so the endpoint exists consistently; for
+        # non-diffusion models it simply never emits events.
+        self.diffusion_event_broadcaster: DiffusionEventBroadcaster | None = None
+        if vllm_config.observability_config.diffusion_stream_canvas:
+            self.diffusion_event_broadcaster = DiffusionEventBroadcaster()
+
         # Converts EngineCoreOutputs --> RequestOutput.
         self.output_processor = OutputProcessor(
             renderer.tokenizer,
             log_stats=self.log_stats,
             stream_interval=self.vllm_config.scheduler_config.stream_interval,
             tracing_enabled=tracing_endpoint is not None,
+            diffusion_event_broadcaster=self.diffusion_event_broadcaster,
         )
 
         # EngineCore (starts the engine in background process).

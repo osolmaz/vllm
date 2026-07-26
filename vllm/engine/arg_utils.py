@@ -637,6 +637,7 @@ class EngineArgs:
         ObservabilityConfig, "kv_cache_metrics_sample"
     )
     cudagraph_metrics: bool = ObservabilityConfig.cudagraph_metrics
+    diffusion_stream_canvas: bool = ObservabilityConfig.diffusion_stream_canvas
     enable_layerwise_nvtx_tracing: bool = (
         ObservabilityConfig.enable_layerwise_nvtx_tracing
     )
@@ -1373,6 +1374,10 @@ class EngineArgs:
             **observability_kwargs["cudagraph_metrics"],
         )
         observability_group.add_argument(
+            "--diffusion-stream-canvas",
+            **observability_kwargs["diffusion_stream_canvas"],
+        )
+        observability_group.add_argument(
             "--enable-layerwise-nvtx-tracing",
             **observability_kwargs["enable_layerwise_nvtx_tracing"],
         )
@@ -1800,6 +1805,7 @@ class EngineArgs:
             kv_cache_metrics=self.kv_cache_metrics,
             kv_cache_metrics_sample=self.kv_cache_metrics_sample,
             cudagraph_metrics=self.cudagraph_metrics,
+            diffusion_stream_canvas=self.diffusion_stream_canvas,
             enable_layerwise_nvtx_tracing=self.enable_layerwise_nvtx_tracing,
             enable_mfu_metrics=self.enable_mfu_metrics,
             enable_mm_processor_stats=self.enable_mm_processor_stats,
